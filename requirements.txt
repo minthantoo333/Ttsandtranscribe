@@ -5,3 +5,4 @@ pydub
 google-generativeai
 faster-whisper
 ffmpeg-python
+pyaudioop
