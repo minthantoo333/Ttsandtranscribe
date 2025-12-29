@@ -1,6 +1,6 @@
 # ========================================================
 # ALL-IN-ONE Telegram Bot:
-# TTS + SSML + SRT → Audio
+# TTS + SSML + SRT → Audio (Professional Handling)
 # ========================================================
 
 import os, logging, threading
@@ -79,7 +79,7 @@ def srt_time_to_ms(t):
     return (t.hours*3600 + t.minutes*60 + t.seconds)*1000 + t.milliseconds
 
 def estimate_seconds(text):
-    return max(0.4, len(text)/14)
+    return max(0.4, len(text)/14)  # ~14 chars/sec
 
 def preprocess_text(text):
     return text.replace("။","။\n").replace(".",".\n").strip()
@@ -90,6 +90,7 @@ async def srt_to_audio(srt_file, output_file, voice):
     final_audio = AudioSegment.silent(0)
     cursor = 0
     i = 0
+
     while i < len(subs):
         sub = subs[i]
         start_ms = srt_time_to_ms(sub.start)
@@ -98,25 +99,79 @@ async def srt_to_audio(srt_file, output_file, voice):
         slot_sec = slot_ms / 1000
         text = preprocess_text(sub.text)
         if not text:
-            i+=1
+            i += 1
             continue
+
         if start_ms > cursor:
-            final_audio += AudioSegment.silent(start_ms-cursor)
+            final_audio += AudioSegment.silent(start_ms - cursor)
             cursor = start_ms
+
         est = estimate_seconds(text)
-        rate = 0
-        if est > slot_sec:
-            rate = min(int((est/slot_sec-1)*100), int((MAX_SPEED-1)*100))
+
+        # -------- CASE HANDLING --------
+        if est <= slot_sec:
+            # Case A: fits naturally
+            rate = 0
+            temp_text = text
+        elif est <= slot_sec * MAX_SPEED:
+            # Case B: slightly longer → speed up
+            rate = min(int((est/slot_sec - 1) * 100), int((MAX_SPEED - 1) * 100))
+            temp_text = text
+        else:
+            # Case C: too long → merge or split
+            rate = 0
+            next_i = i + 1
+            merged_text = text
+            merged_slot_ms = slot_ms
+
+            # Try merge with next subtitle if gap small
+            if next_i < len(subs):
+                next_sub = subs[next_i]
+                gap = srt_time_to_ms(next_sub.start) - end_ms
+                if gap <= 500:  # ≤0.5 sec gap
+                    merged_text += " " + preprocess_text(next_sub.text)
+                    merged_slot_ms += srt_time_to_ms(next_sub.end) - srt_time_to_ms(next_sub.start) + gap
+                    i += 1  # skip next subtitle
+            temp_text = merged_text
+            slot_ms = merged_slot_ms
+            slot_sec = slot_ms / 1000
+            est = estimate_seconds(temp_text)
+            
+            # Still too long? Split by punctuation
+            if est > slot_sec * MAX_SPEED:
+                puncts = [".", "!", "?", "၊", ","]
+                for p in puncts:
+                    if p in temp_text:
+                        parts = temp_text.split(p)
+                        first_part = parts[0] + p
+                        remaining = p.join(parts[1:]).strip()
+                        temp_text = first_part
+                        # Carry remaining to next slot
+                        if remaining:
+                            new_sub = pysrt.SubRipItem(
+                                index=sub.index+1,
+                                start=sub.end,
+                                end=sub.end,  # auto adjust later
+                                text=remaining
+                            )
+                            subs.insert(i+1, new_sub)
+                        break
+
+        # Generate audio
         rate_str = f"+{rate}%"
-        temp = f"_seg_{i}.wav"
-        await edge_tts.Communicate(text=text, voice=voice, rate=rate_str).save(temp)
-        seg = AudioSegment.from_file(temp)
-        os.remove(temp)
+        temp_file = f"_seg_{i}.wav"
+        await edge_tts.Communicate(text=temp_text, voice=voice, rate=rate_str).save(temp_file)
+        seg = AudioSegment.from_file(temp_file)
+        os.remove(temp_file)
+
+        # Trim if slightly over slot
         if len(seg) > slot_ms:
             seg = seg[:slot_ms]
+
         final_audio += seg
         cursor += len(seg)
-        i+=1
+        i += 1
+
     final_audio.export(output_file, format="mp3")
 
 # ================= COMMANDS =================
@@ -208,7 +263,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ssml", ssml_mode))
     app.add_handler(CommandHandler("voice", set_voice))
-    app.add_handler(CommandHandler("srtsms", srt_text_mode))  # NEW command
+    app.add_handler(CommandHandler("srtsms", srt_text_mode))
     app.add_handler(MessageHandler(filters.Document.FileExtension("srt"), handle_srt))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
