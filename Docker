@@ -1,0 +1,18 @@
+# Use official Python image
+FROM python:3.12-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y ffmpeg
+
+# Set working directory
+WORKDIR /app
+
+# Copy files
+COPY . /app
+
+# Install Python dependencies
+RUN pip install --upgrade pip
+RUN pip install -r requirements.txt
+
+# Start bot
+CMD ["python", "bot.py"]
