@@ -1,18 +1,23 @@
-# Use official Python image
-FROM python:3.12-slim
+FROM python:3.13-slim
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y ffmpeg
-
-# Set working directory
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
-# Copy files
+# Install ffmpeg and small required libs at build time
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg libsndfile1 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install Python deps
+COPY requirements.txt /app/requirements.txt
+RUN python -m pip install --upgrade pip && \
+    pip install -r /app/requirements.txt
+
+# Copy app files
 COPY . /app
 
-# Install Python dependencies
-RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
+ENV PORT=10000
 
-# Start bot
-CMD ["python", "bot.py"]
+# Start (start.sh must not run apt-get)
+CMD ["bash", "start.sh"]
