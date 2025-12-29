@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-apt-get update
-apt-get install -y ffmpeg
-
+# Do not run apt here — system packages must be installed during image build.
+# Start the bot directly.
 python bot.py
