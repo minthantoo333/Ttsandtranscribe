@@ -1,15 +1,15 @@
 # ========================================================
-# ALL-IN-ONE Telegram Bot (UI Improved + SRT Text Support)
+# ALL-IN-ONE Telegram Bot:
+# TTS + SSML + SRT → Audio
 # ========================================================
 
-import os, logging, threading, subprocess, re
+import os, logging, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import subprocess
 
 import edge_tts
 import pysrt
 from pydub import AudioSegment
-import google.generativeai as genai
-from faster_whisper import WhisperModel
 
 from telegram import Update
 from telegram.ext import (
@@ -18,31 +18,50 @@ from telegram.ext import (
 
 # ================= CONFIG =================
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 PORT = int(os.environ.get("PORT", 10000))
 DEFAULT_VOICE = "my-MM-ThihaNeural"
 MAX_SPEED = 1.5
-
-genai.configure(api_key=GEMINI_KEY)
-gemini = genai.GenerativeModel("gemini-1.5-flash")
-
-whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
 
 # ================= LOGGING =================
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# ================= VOICES =================
+# ================= VOICE CATALOG =================
 VOICE_CATALOG = {
+    # Burmese
     "my-thiha": "my-MM-ThihaNeural",
     "my-nilar": "my-MM-NilarNeural",
+
+    # English US
     "en-jenny": "en-US-JennyNeural",
     "en-guy": "en-US-GuyNeural",
     "en-aria": "en-US-AriaNeural",
+    "en-ryan": "en-US-RyanNeural",
+    "en-davis": "en-US-DavisNeural",
+
+    # English UK
     "uk-libby": "en-GB-LibbyNeural",
+    "uk-ryan": "en-GB-RyanNeural",
+
+    # Japanese
     "jp-nanami": "ja-JP-NanamiNeural",
+    "jp-keita": "ja-JP-KeitaNeural",
+
+    # Korean
     "kr-sunhi": "ko-KR-SunHiNeural",
+    "kr-injoon": "ko-KR-InJoonNeural",
+
+    # Chinese
     "zh-xiaoxiao": "zh-CN-XiaoxiaoNeural",
+    "zh-yunxi": "zh-CN-YunxiNeural",
+
+    # Hindi
+    "hi-swara": "hi-IN-SwaraNeural",
+    "hi-madhur": "hi-IN-MadhurNeural",
+
+    # French
+    "fr-denise": "fr-FR-DeniseNeural",
+    "fr-henri": "fr-FR-HenriNeural",
 }
 
 # ================= KEEP ALIVE =================
@@ -65,176 +84,137 @@ def estimate_seconds(text):
 def preprocess_text(text):
     return text.replace("။","။\n").replace(".",".\n").strip()
 
-def is_srt_text(text):
-    return bool(re.search(r"\d+\s*\n\d\d:\d\d:\d\d,\d\d\d\s-->", text))
-
-# ================= GEMINI =================
-async def shorten_text(text, target_sec):
-    try:
-        r = gemini.generate_content(
-            f"Shorten to fit {target_sec:.1f}s, natural speech:\n{text}"
-        )
-        return r.text.strip()
-    except:
-        return text
-
 # ================= SRT → AUDIO =================
 async def srt_to_audio(srt_file, output_file, voice):
     subs = pysrt.open(srt_file)
-    audio = AudioSegment.silent(0)
+    final_audio = AudioSegment.silent(0)
     cursor = 0
-
-    for i, sub in enumerate(subs):
-        start = srt_time_to_ms(sub.start)
-        end = srt_time_to_ms(sub.end)
-        slot_ms = end - start
+    i = 0
+    while i < len(subs):
+        sub = subs[i]
+        start_ms = srt_time_to_ms(sub.start)
+        end_ms = srt_time_to_ms(sub.end)
+        slot_ms = end_ms - start_ms
+        slot_sec = slot_ms / 1000
         text = preprocess_text(sub.text)
-
-        if start > cursor:
-            audio += AudioSegment.silent(start - cursor)
-            cursor = start
-
+        if not text:
+            i+=1
+            continue
+        if start_ms > cursor:
+            final_audio += AudioSegment.silent(start_ms-cursor)
+            cursor = start_ms
         est = estimate_seconds(text)
-        if est > slot_ms/1000 * MAX_SPEED:
-            text = await shorten_text(text, slot_ms/1000)
-
-        temp = f"_seg{i}.wav"
-        await edge_tts.Communicate(text, voice).save(temp)
+        rate = 0
+        if est > slot_sec:
+            rate = min(int((est/slot_sec-1)*100), int((MAX_SPEED-1)*100))
+        rate_str = f"+{rate}%"
+        temp = f"_seg_{i}.wav"
+        await edge_tts.Communicate(text=text, voice=voice, rate=rate_str).save(temp)
         seg = AudioSegment.from_file(temp)
         os.remove(temp)
-
-        audio += seg[:slot_ms]
+        if len(seg) > slot_ms:
+            seg = seg[:slot_ms]
+        final_audio += seg
         cursor += len(seg)
-
-    audio.export(output_file, format="mp3")
-
-# ================= TRANSCRIPTION =================
-def extract_audio(input_file, output_wav):
-    subprocess.run(
-        ["ffmpeg","-y","-i",input_file,"-ar","16000","-ac","1",output_wav],
-        check=True
-    )
-
-def transcribe_to_txt_srt(wav, txt, srt):
-    segments, _ = whisper_model.transcribe(wav, beam_size=5, vad_filter=True)
-
-    with open(txt,"w",encoding="utf-8") as t, open(srt,"w",encoding="utf-8") as s:
-        i = 1
-        for seg in segments:
-            t.write(seg.text.strip()+"\n")
-            s.write(f"{i}\n{seg.start:.3f} --> {seg.end:.3f}\n{seg.text.strip()}\n\n")
-            i += 1
+        i+=1
+    final_audio.export(output_file, format="mp3")
 
 # ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     context.user_data["voice"] = DEFAULT_VOICE
     context.user_data["mode"] = "tts"
-
+    context.user_data["srt_text_mode"] = False
     await update.message.reply_text(
-        "🤖 **AI Media Bot Ready**\n\n"
-        "🗣 Text → Voice\n"
-        "🎬 SRT (file or text) → Audio\n"
-        "🎥 Video/Audio → TXT + SRT\n\n"
-        "⚙ Commands:\n"
-        "/voice – choose voice\n"
-        "/ssml – SSML mode",
-        parse_mode="Markdown"
+        "👋 Bot ready!\n\n"
+        "🗣 Send text → TTS\n"
+        "🧠 /ssml → SSML mode\n"
+        "🎥 Upload .srt → Audio\n"
+        "📝 /srtsms → Toggle SRT text mode\n"
+        "📌 /voice → select voice"
     )
 
 async def ssml_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["mode"] = "ssml"
-    await update.message.reply_text("🧠 **SSML MODE ON**\nSend SSML markup.")
+    context.user_data["mode"]="ssml"
+    await update.message.reply_text(
+        "🧠 SSML MODE ON\nSend SSML markup now."
+    )
 
 async def set_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        msg = "🎙 **Available Voices**\n\n"
-        msg += "\n".join([f"• `{k}`" for k in VOICE_CATALOG])
-        msg += "\n\nUse:\n`/voice en-jenny`"
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        msg="🎙 Available voices:\n"
+        for k in VOICE_CATALOG: msg+=f"• {k}\n"
+        msg+="\nUse:\n/voice en-jenny"
+        await update.message.reply_text(msg)
         return
-
     key = context.args[0].lower()
     if key not in VOICE_CATALOG:
-        await update.message.reply_text("❌ Voice not found.")
+        await update.message.reply_text("❌ Voice not found. Use /voice to list.")
         return
+    context.user_data["voice"]=VOICE_CATALOG[key]
+    await update.message.reply_text(f"✅ Voice set to `{VOICE_CATALOG[key]}`",parse_mode="Markdown")
 
-    context.user_data["voice"] = VOICE_CATALOG[key]
-    await update.message.reply_text(f"✅ Voice set to `{VOICE_CATALOG[key]}`", parse_mode="Markdown")
+async def srt_text_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle SRT Text Mode"""
+    mode = context.user_data.get("srt_text_mode", False)
+    context.user_data["srt_text_mode"] = not mode
+    status = "ON ✅" if not mode else "OFF ❌"
+    await update.message.reply_text(f"📝 SRT Text Mode: {status}")
 
-# ================= HANDLERS =================
+# ================= MESSAGE HANDLERS =================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     voice = context.user_data.get("voice", DEFAULT_VOICE)
-    text = update.message.text
-
-    # SRT pasted as text
-    if is_srt_text(text):
-        await update.message.reply_text("🎬 **Detected SRT text – generating audio...**")
-        srt_path = "temp.srt"
-        out = "srt_audio.mp3"
-        open(srt_path,"w",encoding="utf-8").write(text)
+    mode = context.user_data.get("mode", "tts")
+    srt_mode = context.user_data.get("srt_text_mode", False)
+    text = update.message.text.strip()
+    
+    # If SRT-text mode ON and message looks like SRT
+    if srt_mode and any("-->" in line for line in text.splitlines()):
+        await update.message.reply_text("🎬 Processing SRT text...")
+        srt_path = f"srt_{update.message.from_user.id}.srt"
+        out = f"srt_{update.message.from_user.id}.mp3"
+        with open(srt_path, "w", encoding="utf-8") as f:
+            f.write(text)
         await srt_to_audio(srt_path, out, voice)
-        await update.message.reply_audio(open(out,"rb"))
+        await update.message.reply_audio(audio=open(out, "rb"), caption="✅ SRT Text → Audio")
         os.remove(srt_path)
         os.remove(out)
         return
 
-    # Normal TTS / SSML
-    out = "tts.mp3"
-    if context.user_data.get("mode") == "ssml":
+    # Normal TTS
+    out = f"tts_{update.message.from_user.id}.mp3"
+    if mode == "ssml":
         await edge_tts.Communicate(text, voice, ssml=True).save(out)
         context.user_data["mode"] = "tts"
     else:
         await edge_tts.Communicate(preprocess_text(text), voice).save(out)
-
-    await update.message.reply_audio(open(out,"rb"))
+    await update.message.reply_audio(audio=open(out, "rb"))
     os.remove(out)
 
-async def handle_srt_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎬 Processing SRT file...")
-    srt = "file.srt"
-    out = "srt_audio.mp3"
-    await update.message.document.get_file().download_to_drive(srt)
-    await srt_to_audio(srt, out, context.user_data.get("voice", DEFAULT_VOICE))
-    await update.message.reply_audio(open(out,"rb"))
-    os.remove(srt)
+    srt_path = f"srt_{update.message.from_user.id}.srt"
+    out = f"srt_{update.message.from_user.id}.mp3"
+    await update.message.document.get_file().download_to_drive(srt_path)
+    await srt_to_audio(srt_path, out, context.user_data.get("voice", DEFAULT_VOICE))
+    await update.message.reply_audio(audio=open(out, "rb"), caption="✅ SRT → Audio")
+    os.remove(srt_path)
     os.remove(out)
-
-async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎧 Transcribing media...")
-    file = update.message.video or update.message.audio or update.message.voice
-    tg = await file.get_file()
-
-    inp = "input"
-    wav = "audio.wav"
-    txt = "out.txt"
-    srt = "out.srt"
-
-    await tg.download_to_drive(inp)
-    extract_audio(inp, wav)
-    transcribe_to_txt_srt(wav, txt, srt)
-
-    await update.message.reply_document(open(txt,"rb"))
-    await update.message.reply_document(open(srt,"rb"))
-
-    for f in [inp,wav,txt,srt]:
-        os.remove(f)
 
 # ================= MAIN =================
 def main():
     app = Application.builder().token(TOKEN).build()
-
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ssml", ssml_mode))
     app.add_handler(CommandHandler("voice", set_voice))
-
-    app.add_handler(MessageHandler(filters.Document.FileExtension("srt"), handle_srt_file))
-    app.add_handler(MessageHandler(filters.VIDEO | filters.AUDIO | filters.VOICE, handle_media))
+    app.add_handler(CommandHandler("srtsms", srt_text_mode))  # NEW command
+    app.add_handler(MessageHandler(filters.Document.FileExtension("srt"), handle_srt))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
+    
     threading.Thread(target=run_web, daemon=True).start()
     print("🤖 Bot running...")
     app.run_polling()
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
