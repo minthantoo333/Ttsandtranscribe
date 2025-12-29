@@ -1,23 +1,18 @@
-FROM python:3.13-slim
+FROM python:3.11-slim
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
+# system deps
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Install ffmpeg and necessary OS libs at build time
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg libsndfile1 && \
-    rm -rf /var/lib/apt/lists/*
+COPY requirements.txt .
 
-# Copy requirements and install Python deps
-COPY requirements.txt /app/requirements.txt
-RUN python -m pip install --upgrade pip && \
-    pip install -r /app/requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
-# Copy app
-COPY . /app
+COPY . .
 
-ENV PORT=10000
-
-# Start (start.sh must NOT run apt-get)
 CMD ["bash", "start.sh"]
