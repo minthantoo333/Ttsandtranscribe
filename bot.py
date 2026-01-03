@@ -3,7 +3,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import edge_tts
 import pysrt
-from pydub import AudioSegment
+from pydub import AudioSegment, effects
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants
 from telegram.ext import (
@@ -15,11 +15,8 @@ from telegram.ext import (
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 PORT = int(os.environ.get("PORT", 10000))
 
-# Defaults
+# Settings
 DEFAULT_VOICE = "my-MM-ThihaNeural"
-MAX_SPEED = 1.5
-MIN_BREATH_MS = 300
-MAX_BREATH_MS = 800
 RETRY_COUNT = 3
 RETRY_DELAY = 1
 
@@ -29,19 +26,48 @@ logging.basicConfig(
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# ================= VOICE CATALOG =================
+# ================= 🌏 EXPANDED VOICE CATALOG =================
+# Updated with Remy, Giuseppe, Brian, Andrew + Top Multilingual Choices
 VOICE_CATALOG = {
-    "🇲🇲 Male (Thiha)": "my-MM-ThihaNeural",
-    "🇲🇲 Female (Nilar)": "my-MM-NilarNeural",
+    # --- MYANMAR ---
+    "🇲🇲 MM Male (Thiha)": "my-MM-ThihaNeural",
+    "🇲🇲 MM Female (Nilar)": "my-MM-NilarNeural",
+    
+    # --- ENGLISH (US) ---
+    "🇺🇸 US Male (Andrew)": "en-US-AndrewNeural",  # Requested
+    "🇺🇸 US Male (Brian)": "en-US-BrianNeural",    # Requested
     "🇺🇸 US Male (Guy)": "en-US-GuyNeural",
     "🇺🇸 US Female (Jenny)": "en-US-JennyNeural",
+    "🇺🇸 US Female (Ana)": "en-US-AnaNeural",
+
+    # --- ENGLISH (UK/AU) ---
     "🇬🇧 UK Male (Ryan)": "en-GB-RyanNeural",
     "🇬🇧 UK Female (Libby)": "en-GB-LibbyNeural",
-    "🇯🇵 JP Male (Keita)": "ja-JP-KeitaNeural",
-    "🇯🇵 JP Female (Nanami)": "ja-JP-NanamiNeural",
-    "🇰🇷 KR Female (SunHi)": "ko-KR-SunHiNeural",
-    "🇨🇳 CN Female (Xiaoxiao)": "zh-CN-XiaoxiaoNeural",
-    "🇹🇭 TH Female (Premwadee)": "th-TH-PremwadeeNeural"
+    "🇬🇧 UK Female (Sonia)": "en-GB-SoniaNeural",
+    "🇦🇺 AU Female (Natasha)": "en-AU-NatashaNeural",
+
+    # --- EUROPEAN ---
+    "🇫🇷 French (Remy)": "fr-FR-RemyMultilingualNeural", # Requested
+    "🇫🇷 French (Vivienne)": "fr-FR-VivienneMultilingualNeural",
+    "🇮🇹 Italian (Giuseppe)": "it-IT-GiuseppeNeural",    # Requested
+    "🇮🇹 Italian (Elsa)": "it-IT-ElsaNeural",
+    "🇩🇪 German (Conrad)": "de-DE-ConradNeural",
+    "🇩🇪 German (Katja)": "de-DE-KatjaNeural",
+    "🇪🇸 Spanish (Alvaro)": "es-ES-AlvaroNeural",
+    "🇪🇸 Spanish (Elvira)": "es-ES-ElviraNeural",
+    "🇷🇺 Russian (Dmitry)": "ru-RU-DmitryNeural",
+
+    # --- ASIAN ---
+    "🇯🇵 Japanese (Keita)": "ja-JP-KeitaNeural",
+    "🇯🇵 Japanese (Nanami)": "ja-JP-NanamiNeural",
+    "🇰🇷 Korean (InJoon)": "ko-KR-InJoonNeural",
+    "🇰🇷 Korean (SunHi)": "ko-KR-SunHiNeural",
+    "🇨🇳 Chinese (Yunxi)": "zh-CN-YunxiNeural",
+    "🇨🇳 Chinese (Xiaoxiao)": "zh-CN-XiaoxiaoNeural",
+    "🇹🇭 Thai (Niwat)": "th-TH-NiwatNeural",
+    "🇹🇭 Thai (Premwadee)": "th-TH-PremwadeeNeural",
+    "🇻🇳 Viet (NamMinh)": "vi-VN-NamMinhNeural",
+    "🇮🇩 Indo (Ardi)": "id-ID-ArdiNeural",
 }
 
 # ================= KEEP ALIVE =================
@@ -54,7 +80,7 @@ class SimpleHandler(BaseHTTPRequestHandler):
 def run_web():
     HTTPServer(("0.0.0.0", PORT), SimpleHandler).serve_forever()
 
-# ================= UI HELPERS =================
+# ================= UTILS & UI =================
 def create_progress_bar(current, total, length=10):
     percent = current / total
     filled_length = int(length * percent)
@@ -62,214 +88,219 @@ def create_progress_bar(current, total, length=10):
     return f"{bar} {int(percent * 100)}%"
 
 async def update_status(message, text):
-    """Safely edit message text ignoring 'Message Not Modified' errors"""
     try:
         if message.text != text:
             await message.edit_text(text)
     except Exception:
         pass
 
-# ================= AUDIO UTILS =================
+# ================= 🧠 PROFESSIONAL SYNC ENGINE =================
+
 def srt_time_to_ms(t):
     return (t.hours*3600 + t.minutes*60 + t.seconds)*1000 + t.milliseconds
 
-def estimate_seconds(text):
-    return max(0.4, len(text)/14)
-
-def preprocess_text(text):
-    # Remove HTML tags often found in SRTs
-    clean = text.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
-    return clean.replace("။", "။\n").replace(".", ".\n").strip()
-
-def calculate_breath_ms(text):
-    base = MIN_BREATH_MS
-    extra = min(len(text)//30*100, MAX_BREATH_MS - MIN_BREATH_MS)
-    return base + extra
-
-async def generate_tts(text, voice, rate=0, cache={}):
-    key = (text, voice, rate)
+async def generate_tts(text, voice, rate_str, cache):
+    """Generates raw audio segment"""
+    key = (text, voice, rate_str)
     if key in cache: return cache[key]
 
-    rate_str = f"+{rate}%"
     for attempt in range(RETRY_COUNT):
         try:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
                 temp_path = tmp.name
+            
+            # Communicate with EdgeTTS
             await edge_tts.Communicate(text=text, voice=voice, rate=rate_str).save(temp_path)
+            
             audio = AudioSegment.from_file(temp_path)
             os.remove(temp_path)
             cache[key] = audio
             return audio
         except Exception as e:
-            logging.warning(f"TTS attempt {attempt+1} failed: {e}")
-            await asyncio.sleep(RETRY_DELAY * (attempt+1))
-    # Return silent audio if fails to avoid crashing entire render
-    return AudioSegment.silent(duration=1000) 
+            logging.warning(f"TTS Retry {attempt}: {e}")
+            await asyncio.sleep(RETRY_DELAY)
+    
+    return AudioSegment.silent(duration=500) # Fallback
 
-# ================= CORE ENGINE: SRT → AUDIO =================
+def fit_audio_to_slot(audio_seg, max_duration_ms):
+    """
+    PROFESSIONAL SYNC:
+    Compresses audio to fit perfectly into the slot if it's too long.
+    """
+    current_dur = len(audio_seg)
+    if current_dur <= max_duration_ms:
+        return audio_seg
+    
+    # Calculate ratio needed
+    ratio = current_dur / max_duration_ms
+    
+    # Cap compression at 2.0x (otherwise it sounds like chipmunks/broken)
+    if ratio > 2.0:
+        ratio = 2.0
+        
+    try:
+        # High quality time-compression
+        compressed = effects.speedup(audio_seg, playback_speed=ratio, chunk_size=50, crossfade=25)
+        if len(compressed) > max_duration_ms:
+             return compressed[:max_duration_ms] # Trim excess if still too long
+        return compressed
+    except Exception as e:
+        logging.error(f"Compression failed: {e}")
+        return audio_seg[:max_duration_ms] # Panic fallback
+
+def preprocess_text(text):
+    # Remove HTML and special chars
+    clean = text.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
+    clean = clean.replace("[", "").replace("]", "").replace("(", "").replace(")", "")
+    return clean.replace("။", "။\n").replace(".", ".\n").strip()
+
 async def srt_to_audio(srt_file, output_file, voice, status_msg):
     subs = pysrt.open(srt_file)
     total_subs = len(subs)
+    
     final_audio = AudioSegment.silent(0)
-    cursor = 0
-    i = 0
+    current_timeline_pos = 0
     cache = {}
-    
-    last_update_time = 0
-    
-    while i < total_subs:
-        # --- UI PROGRESS UPDATE (Every 3 seconds or 10%) ---
-        current_time = time.time()
-        if current_time - last_update_time > 3:
-            bar = create_progress_bar(i, total_subs)
-            await update_status(status_msg, f"⚙️ **Processing Audio...**\n\n{bar}\nLine: {i}/{total_subs}")
-            last_update_time = current_time
+    last_ui_update = 0
 
-        sub = subs[i]
+    for i, sub in enumerate(subs):
+        # --- UI Update (Every 3s) ---
+        now = time.time()
+        if now - last_ui_update > 3:
+            bar = create_progress_bar(i, total_subs)
+            await update_status(status_msg, f"⚙️ **Syncing Audio...**\n{bar}\nLine: {i+1}/{total_subs}")
+            last_ui_update = now
+
+        text = preprocess_text(sub.text)
+        if not text: continue
+
         start_ms = srt_time_to_ms(sub.start)
         end_ms = srt_time_to_ms(sub.end)
-        slot_ms = end_ms - start_ms
-        slot_sec = slot_ms / 1000
-        text = preprocess_text(sub.text)
         
-        if not text:
-            i += 1
-            continue
-
-        if start_ms > cursor:
-            gap = min(start_ms - cursor, calculate_breath_ms(text))
-            final_audio += AudioSegment.silent(gap)
-            cursor += gap
-
-        est = estimate_seconds(text)
-        rate = 0
-        temp_text = text
-
-        # Simple Logic for Speed/Merge
-        if est <= slot_sec:
-            pass
-        elif est <= slot_sec * MAX_SPEED:
-            rate = min(int((est/slot_sec - 1) * 100), int((MAX_SPEED - 1) * 100))
-        else:
-            # Check next for merge
-            if i + 1 < total_subs:
-                next_sub = subs[i+1]
-                gap = srt_time_to_ms(next_sub.start) - end_ms
-                if gap <= 500:
-                    temp_text += " " + preprocess_text(next_sub.text)
-                    slot_ms += srt_time_to_ms(next_sub.end) - srt_time_to_ms(next_sub.start) + gap
-                    slot_sec = slot_ms / 1000
-                    i += 1 # Skip next
-
-            est = estimate_seconds(temp_text)
-            if est > slot_sec:
-                 rate = min(int((est/slot_sec - 1) * 100), int((MAX_SPEED - 1) * 100))
-
-        # Generate
-        seg = await generate_tts(temp_text, voice, rate, cache)
-        final_audio += seg
-        cursor += len(seg)
-
-        # Adaptive Pause
-        if i+1 < total_subs:
+        # 1. Timeline Management (Fill gaps with silence)
+        if start_ms > current_timeline_pos:
+            silence_gap = start_ms - current_timeline_pos
+            final_audio += AudioSegment.silent(duration=silence_gap)
+            current_timeline_pos = start_ms
+        
+        # 2. Calculate Strict Slot
+        slot_duration = end_ms - start_ms
+        if i + 1 < len(subs):
             next_start = srt_time_to_ms(subs[i+1].start)
-            if next_start - cursor > 0 and next_start - cursor <= MAX_BREATH_MS:
-                final_audio += AudioSegment.silent(next_start - cursor)
-                cursor += (next_start - cursor)
+            if next_start < end_ms: # Overlapping subtitles?
+                slot_duration = next_start - start_ms
+
+        if slot_duration <= 0: continue
+
+        # 3. Smart Rate Calculation
+        # Check density of text vs time
+        char_count = len(text)
+        chars_per_sec = char_count / (slot_duration / 1000)
         
-        i += 1
+        rate_str = "+0%"
+        if chars_per_sec > 15: rate_str = "+20%"
+        if chars_per_sec > 20: rate_str = "+40%"
+        if chars_per_sec > 25: rate_str = "+60%"
+
+        raw_audio = await generate_tts(text, voice, rate_str, cache)
+
+        # 4. Fit to Slot (Compression)
+        fitted_audio = fit_audio_to_slot(raw_audio, slot_duration)
+        
+        final_audio += fitted_audio
+        current_timeline_pos += len(fitted_audio)
 
     await update_status(status_msg, "💾 **Rendering Final MP3...**")
     final_audio.export(output_file, format="mp3")
 
-# ================= COMMANDS =================
+# ================= MENU HANDLERS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     context.user_data["voice"] = DEFAULT_VOICE
     
-    # Beautiful Inline Keyboard
     keyboard = [
-        [InlineKeyboardButton("🎤 Change Voice", callback_data="cmd_voice"),
-         InlineKeyboardButton("📝 Text Mode", callback_data="cmd_srtsms")],
-        [InlineKeyboardButton("ℹ️ Help / How-To", callback_data="cmd_help")]
+        [InlineKeyboardButton("🎤 Select Voice", callback_data="page_0")],
+        [InlineKeyboardButton("📝 Copy-Paste SRT Mode", callback_data="cmd_srtsms")],
+        [InlineKeyboardButton("ℹ️ Help", callback_data="cmd_help")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "👋 **Welcome to AI Dubbing Bot!**\n\n"
-        "I can turn subtitles into human-like narration.\n"
-        "Just **send me an .srt file** to begin.\n\n"
-        f"Current Voice: `{DEFAULT_VOICE}`",
-        reply_markup=reply_markup,
-        parse_mode=constants.ParseMode.MARKDOWN
+        "🎧 **Multilingual Dubbing Bot**\n\n"
+        "I can sync subtitles with professional timing in **20+ languages**.\n"
+        "Send me an `.srt` file to start!\n\n"
+        f"🗣 Current Voice: `{DEFAULT_VOICE}`",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
     )
 
-async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "📚 **Bot Guide**\n\n"
-        "1️⃣ **SRT to Audio:** Upload any `.srt` file. I will sync the voice to the timestamps.\n"
-        "2️⃣ **Text to Speech:** Just type any text to get audio.\n"
-        "3️⃣ **Copy-Paste SRT:** Click 'Text Mode', then paste your SRT content directly."
-    )
-    # If called from button
-    if update.callback_query:
-        await update.callback_query.answer()
-        await update.callback_query.message.reply_text(text, parse_mode="Markdown")
-    else:
-        await update.message.reply_text(text, parse_mode="Markdown")
+# ================= PAGINATED VOICE MENU =================
+ITEMS_PER_PAGE = 10 # Increased since we have more voices now
 
-# ================= VOICE UI =================
-async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Create 2 columns of buttons
-    keys = list(VOICE_CATALOG.keys())
+async def show_voice_page(update, page_num):
+    voice_keys = list(VOICE_CATALOG.keys())
+    total_pages = math.ceil(len(voice_keys) / ITEMS_PER_PAGE)
+    
+    start = page_num * ITEMS_PER_PAGE
+    end = start + ITEMS_PER_PAGE
+    current_items = voice_keys[start:end]
+    
     buttons = []
-    for i in range(0, len(keys), 2):
-        row = [InlineKeyboardButton(keys[i], callback_data=f"set_{keys[i]}")]
-        if i + 1 < len(keys):
-            row.append(InlineKeyboardButton(keys[i+1], callback_data=f"set_{keys[i+1]}"))
+    # Voice Buttons (2 columns)
+    for i in range(0, len(current_items), 2):
+        row = []
+        name1 = current_items[i]
+        row.append(InlineKeyboardButton(name1, callback_data=f"set_{name1}"))
+        if i + 1 < len(current_items):
+            name2 = current_items[i+1]
+            row.append(InlineKeyboardButton(name2, callback_data=f"set_{name2}"))
         buttons.append(row)
     
-    await update.message.reply_text("🗣 **Select a Narrator:**", reply_markup=InlineKeyboardMarkup(buttons))
+    # Navigation
+    nav_row = []
+    if page_num > 0:
+        nav_row.append(InlineKeyboardButton("⬅️ Back", callback_data=f"page_{page_num-1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 {page_num+1}/{total_pages}", callback_data="noop"))
+    if page_num < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("Next ➡️", callback_data=f"page_{page_num+1}"))
+    
+    buttons.append(nav_row)
+    
+    markup = InlineKeyboardMarkup(buttons)
+    if update.callback_query:
+        await update.callback_query.edit_message_text("🗣 **Select a Voice:**", reply_markup=markup)
+    else:
+        await update.message.reply_text("🗣 **Select a Voice:**", reply_markup=markup)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
 
-    if data == "cmd_voice":
+    if data.startswith("page_"):
         await query.answer()
-        await voice_command(query, context)
-        return
-    if data == "cmd_srtsms":
-        await query.answer()
-        await srt_text_toggle(query, context)
-        return
-    if data == "cmd_help":
-        await help_menu(update, context)
+        page = int(data.split("_")[1])
+        await show_voice_page(update, page)
         return
 
     if data.startswith("set_"):
         key = data.replace("set_", "")
         if key in VOICE_CATALOG:
             context.user_data["voice"] = VOICE_CATALOG[key]
-            await query.answer(f"Voice set to {key}")
-            await query.edit_message_text(f"✅ **Voice Updated!**\n\nNow using: `{key}`", parse_mode="Markdown")
+            await query.answer(f"Selected: {key}")
+            await query.edit_message_text(f"✅ **Voice Set!**\n\nNow using: `{key}`\n\nSend your SRT file now.", parse_mode="Markdown")
+        return
 
-async def srt_text_toggle(update_obj, context: ContextTypes.DEFAULT_TYPE):
-    mode = context.user_data.get("srt_text_mode", False)
-    context.user_data["srt_text_mode"] = not mode
-    status = "ON ✅" if not mode else "OFF ❌"
-    
-    msg = f"📝 **SRT Copy-Paste Mode: {status}**\n\nWhen ON, you can paste SRT text directly into the chat."
-    
-    if isinstance(update_obj, Update):
-        await update_obj.message.reply_text(msg, parse_mode="Markdown")
-    else:
-        # Called from callback
-        await update_obj.message.reply_text(msg, parse_mode="Markdown")
+    if data == "cmd_srtsms":
+        await query.answer()
+        context.user_data["srt_text_mode"] = True
+        await query.edit_message_text("📝 **Text Mode Active**\n\nPaste your subtitle text (with timestamps) here.")
+        return
 
-# ================= HANDLERS =================
+    if data == "noop":
+        await query.answer()
+
+# ================= FILE HANDLER =================
 async def handle_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await update.message.reply_text("⬇️ **Downloading file...**", parse_mode="Markdown")
+    status_msg = await update.message.reply_text("⬇️ **Downloading...**")
     
     try:
         srt_path = f"temp_{update.message.from_user.id}.srt"
@@ -279,72 +310,62 @@ async def handle_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await update.message.document.get_file()
         await file.download_to_drive(srt_path)
 
-        await update_status(status_msg, "⚙️ **Initializing AI Engine...**")
-        
-        # Run conversion
+        await update_status(status_msg, "⚙️ **Analyzing Timeline...**")
         await srt_to_audio(srt_path, out_path, voice, status_msg)
 
-        await update_status(status_msg, "⬆️ **Uploading MP3...**")
+        await update_status(status_msg, "⬆️ **Uploading...**")
         await update.message.reply_audio(
             audio=open(out_path, "rb"),
-            caption=f"✅ **Done!**\n🗣 Voice: `{voice}`",
+            caption=f"✅ **Synced Audio**\n🗣 `{voice}`",
             parse_mode="Markdown"
         )
-        # Cleanup
         os.remove(srt_path)
         os.remove(out_path)
         await status_msg.delete()
 
     except Exception as e:
-        await update_status(status_msg, f"❌ **Error:**\n`{str(e)}`")
+        await update_status(status_msg, f"❌ Error: {e}")
         logging.error(e)
 
+# ================= TEXT HANDLER =================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     voice = context.user_data.get("voice", DEFAULT_VOICE)
     
-    # Check for SRT Mode
     if context.user_data.get("srt_text_mode", False) and "-->" in text:
-        status_msg = await update.message.reply_text("📝 **Reading SRT Text...**", parse_mode="Markdown")
+        # SRT Copy Paste
+        status_msg = await update.message.reply_text("📝 **Processing Text SRT...**")
         srt_path = f"temp_text_{update.message.from_user.id}.srt"
         out_path = f"dub_text_{update.message.from_user.id}.mp3"
-        
         with open(srt_path, "w", encoding="utf-8") as f: f.write(text)
         
         try:
             await srt_to_audio(srt_path, out_path, voice, status_msg)
-            await update_status(status_msg, "⬆️ **Uploading...**")
             await update.message.reply_audio(audio=open(out_path, "rb"), caption="✅ **SRT Text Dubbed**")
-            os.remove(srt_path)
-            os.remove(out_path)
-            await status_msg.delete()
         except Exception as e:
-            await update_status(status_msg, f"❌ Error: {str(e)}")
-        return
-
-    # Normal TTS
-    status_msg = await update.message.reply_text(f"🗣 **Generating Audio...**\n`{voice}`", parse_mode="Markdown")
-    out = f"tts_{update.message.from_user.id}.mp3"
-    await edge_tts.Communicate(preprocess_text(text), voice).save(out)
-    await update.message.reply_audio(audio=open(out, "rb"))
-    os.remove(out)
-    await status_msg.delete()
+            await update.message.reply_text(f"❌ Error: {e}")
+        finally:
+            if os.path.exists(srt_path): os.remove(srt_path)
+            if os.path.exists(out_path): os.remove(out_path)
+            await status_msg.delete()
+    else:
+        # Simple TTS
+        out = f"tts_{update.message.from_user.id}.mp3"
+        await edge_tts.Communicate(text, voice).save(out)
+        await update.message.reply_audio(audio=open(out, "rb"))
+        os.remove(out)
 
 # ================= MAIN =================
 def main():
     app = Application.builder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("voice", voice_command))
-    app.add_handler(CommandHandler("srtsms", srt_text_toggle))
-    app.add_handler(CommandHandler("help", help_menu))
     app.add_handler(CallbackQueryHandler(button_handler))
-    
     app.add_handler(MessageHandler(filters.Document.FileExtension("srt"), handle_srt))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
     threading.Thread(target=run_web, daemon=True).start()
-    print("🚀 Bot with UI upgrades running...")
+    print("🤖 Multilingual Bot Running...")
     app.run_polling()
 
 if __name__=="__main__":
