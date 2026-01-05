@@ -3,7 +3,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import edge_tts
 import pysrt
-from pydub import AudioSegment, effects
+from pydub import AudioSegment, effects, silence
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants
 from telegram.ext import (
@@ -26,16 +26,15 @@ logging.basicConfig(
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# ================= 🌏 EXPANDED VOICE CATALOG =================
-# Updated with Remy, Giuseppe, Brian, Andrew + Top Multilingual Choices
+# ================= 🌏 VOICE CATALOG =================
 VOICE_CATALOG = {
     # --- MYANMAR ---
     "🇲🇲 MM Male (Thiha)": "my-MM-ThihaNeural",
     "🇲🇲 MM Female (Nilar)": "my-MM-NilarNeural",
     
     # --- ENGLISH (US) ---
-    "🇺🇸 US Male (Andrew)": "en-US-AndrewNeural",  # Requested
-    "🇺🇸 US Male (Brian)": "en-US-BrianNeural",    # Requested
+    "🇺🇸 US Male (Andrew)": "en-US-AndrewNeural",
+    "🇺🇸 US Male (Brian)": "en-US-BrianNeural",
     "🇺🇸 US Male (Guy)": "en-US-GuyNeural",
     "🇺🇸 US Female (Jenny)": "en-US-JennyNeural",
     "🇺🇸 US Female (Ana)": "en-US-AnaNeural",
@@ -47,9 +46,9 @@ VOICE_CATALOG = {
     "🇦🇺 AU Female (Natasha)": "en-AU-NatashaNeural",
 
     # --- EUROPEAN ---
-    "🇫🇷 French (Remy)": "fr-FR-RemyMultilingualNeural", # Requested
+    "🇫🇷 French (Remy)": "fr-FR-RemyMultilingualNeural",
     "🇫🇷 French (Vivienne)": "fr-FR-VivienneMultilingualNeural",
-    "🇮🇹 Italian (Giuseppe)": "it-IT-GiuseppeNeural",    # Requested
+    "🇮🇹 Italian (Giuseppe)": "it-IT-GiuseppeNeural",
     "🇮🇹 Italian (Elsa)": "it-IT-ElsaNeural",
     "🇩🇪 German (Conrad)": "de-DE-ConradNeural",
     "🇩🇪 German (Katja)": "de-DE-KatjaNeural",
@@ -99,6 +98,19 @@ async def update_status(message, text):
 def srt_time_to_ms(t):
     return (t.hours*3600 + t.minutes*60 + t.seconds)*1000 + t.milliseconds
 
+def trim_silence(audio_segment, silence_thresh=-40):
+    """Removes silence from start and end to fit slots better"""
+    try:
+        # pydub detect silence logic can be heavy, simple strip is safer
+        non_silent_start = silence.detect_leading_silence(audio_segment, silence_thresh=silence_thresh)
+        non_silent_end = silence.detect_leading_silence(audio_segment.reverse(), silence_thresh=silence_thresh)
+        duration = len(audio_segment)
+        if duration > (non_silent_start + non_silent_end):
+             return audio_segment[non_silent_start:duration-non_silent_end]
+        return audio_segment
+    except Exception:
+        return audio_segment
+
 async def generate_tts(text, voice, rate_str, cache):
     """Generates raw audio segment"""
     key = (text, voice, rate_str)
@@ -114,6 +126,10 @@ async def generate_tts(text, voice, rate_str, cache):
             
             audio = AudioSegment.from_file(temp_path)
             os.remove(temp_path)
+            
+            # Trim silence immediately to get true duration of speech
+            audio = trim_silence(audio)
+            
             cache[key] = audio
             return audio
         except Exception as e:
@@ -124,8 +140,9 @@ async def generate_tts(text, voice, rate_str, cache):
 
 def fit_audio_to_slot(audio_seg, max_duration_ms):
     """
-    PROFESSIONAL SYNC:
-    Compresses audio to fit perfectly into the slot if it's too long.
+    STRICT SYNC:
+    Compresses audio to fit perfectly into the slot.
+    Prioritizes timing over pitch quality if space is tight.
     """
     current_dur = len(audio_seg)
     if current_dur <= max_duration_ms:
@@ -134,19 +151,32 @@ def fit_audio_to_slot(audio_seg, max_duration_ms):
     # Calculate ratio needed
     ratio = current_dur / max_duration_ms
     
-    # Cap compression at 2.0x (otherwise it sounds like chipmunks/broken)
-    if ratio > 2.0:
-        ratio = 2.0
+    # Safety buffer: speed up slightly more than needed (1.05x) to prevent millisecond overhang
+    ratio = ratio * 1.05
+    
+    # Cap compression at 4.0x (Beyond this is unintelligible, better to just cut)
+    if ratio > 4.0:
+        ratio = 4.0
         
     try:
         # High quality time-compression
-        compressed = effects.speedup(audio_seg, playback_speed=ratio, chunk_size=50, crossfade=25)
+        # Note: speedup requires chunk_size > 1. If audio is tiny, this might fail.
+        if len(audio_seg) > 150: 
+            compressed = effects.speedup(audio_seg, playback_speed=ratio, chunk_size=50, crossfade=25)
+        else:
+            # For micro-clips, simple frame rate change is safer (though pitch shifts)
+            new_frame_rate = int(audio_seg.frame_rate * ratio)
+            compressed = audio_seg._spawn(audio_seg.raw_data, overrides={'frame_rate': new_frame_rate})
+            compressed = compressed.set_frame_rate(audio_seg.frame_rate)
+
+        # STRICT CUT: If still too long despite compression (e.g. artifacts), chop it.
         if len(compressed) > max_duration_ms:
-             return compressed[:max_duration_ms] # Trim excess if still too long
+             return compressed[:max_duration_ms] 
+             
         return compressed
     except Exception as e:
         logging.error(f"Compression failed: {e}")
-        return audio_seg[:max_duration_ms] # Panic fallback
+        return audio_seg[:max_duration_ms] # Panic fallback: just cut the end
 
 def preprocess_text(text):
     # Remove HTML and special chars
@@ -182,34 +212,45 @@ async def srt_to_audio(srt_file, output_file, voice, status_msg):
             silence_gap = start_ms - current_timeline_pos
             final_audio += AudioSegment.silent(duration=silence_gap)
             current_timeline_pos = start_ms
+        elif start_ms < current_timeline_pos:
+            # Overlap detected from previous line (should not happen with our strict logic, but safety check)
+            # If we are ahead of schedule, we don't add silence, but we effectively start "late" relative to this sub's intended start
+            # To fix visual timeline, we just sync to current_timeline_pos
+            pass
         
         # 2. Calculate Strict Slot
         slot_duration = end_ms - start_ms
+        
+        # Look ahead to ensure we don't bleed into the next subtitle
         if i + 1 < len(subs):
             next_start = srt_time_to_ms(subs[i+1].start)
-            if next_start < end_ms: # Overlapping subtitles?
+            # If the next subtitle starts BEFORE this one ends, cut this one short
+            if next_start < end_ms: 
                 slot_duration = next_start - start_ms
 
-        if slot_duration <= 0: continue
+        if slot_duration <= 50: continue # Skip if slot is impossibly small (<50ms)
 
-        # 3. Smart Rate Calculation
+        # 3. Smart Rate Calculation (Native TTS Speed)
         # Check density of text vs time
         char_count = len(text)
         chars_per_sec = char_count / (slot_duration / 1000)
         
+        # More aggressive native speed adjustments
         rate_str = "+0%"
-        if chars_per_sec > 15: rate_str = "+20%"
-        if chars_per_sec > 20: rate_str = "+40%"
-        if chars_per_sec > 25: rate_str = "+60%"
+        if chars_per_sec > 12: rate_str = "+20%"
+        if chars_per_sec > 18: rate_str = "+40%"
+        if chars_per_sec > 22: rate_str = "+60%"
+        if chars_per_sec > 28: rate_str = "+100%" # Max speed for dense text
 
         raw_audio = await generate_tts(text, voice, rate_str, cache)
 
-        # 4. Fit to Slot (Compression)
+        # 4. Fit to Slot (Strict Compression + Trimming)
         fitted_audio = fit_audio_to_slot(raw_audio, slot_duration)
         
         final_audio += fitted_audio
         current_timeline_pos += len(fitted_audio)
 
+    # Final timeline check
     await update_status(status_msg, "💾 **Rendering Final MP3...**")
     final_audio.export(output_file, format="mp3")
 
@@ -234,7 +275,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ================= PAGINATED VOICE MENU =================
-ITEMS_PER_PAGE = 10 # Increased since we have more voices now
+ITEMS_PER_PAGE = 10 
 
 async def show_voice_page(update, page_num):
     voice_keys = list(VOICE_CATALOG.keys())
