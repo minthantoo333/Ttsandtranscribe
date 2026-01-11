@@ -1,9 +1,10 @@
 # Use a lightweight Python version
 FROM python:3.10-slim
 
-# 1. Install FFmpeg and Fonts (Important for Burmese text support)
+# 1. Install FFmpeg and Fonts
+# We removed 'fonts-noto-myanmar' because 'fonts-noto' already includes it now.
 RUN apt-get update && \
-    apt-get install -y ffmpeg fonts-noto fonts-noto-myanmar && \
+    apt-get install -y ffmpeg fonts-noto && \
     rm -rf /var/lib/apt/lists/*
 
 # 2. Set working directory
