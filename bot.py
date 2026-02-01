@@ -10,6 +10,8 @@ import shutil
 import re
 import time
 import sys
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from io import StringIO
 
 # -------------------------------------------------------------------------
@@ -33,9 +35,9 @@ try:
     from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
     from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
     
-    # --- FIXED IMPORT FOR GOOGLE AI ---
-    import google.generativeai as genai
-    # ----------------------------------
+    # --- FIXED IMPORT ---
+    import google.generativeai as genai 
+    # --------------------
 
     from faster_whisper import WhisperModel
     logger.info("✅ All libraries imported.")
@@ -44,13 +46,29 @@ except ImportError as e:
     sys.exit(1)
 
 # -------------------------------------------------------------------------
+# RENDER "FAKE" SERVER (To keep the bot alive)
+# -------------------------------------------------------------------------
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
+
+def start_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    logger.info(f"🌍 Dummy server started on port {port}")
+    server.serve_forever()
+
+# -------------------------------------------------------------------------
 # CONFIGURATION
 # -------------------------------------------------------------------------
-TG_TOKEN = os.getenv("TG_TOKEN")
-GEMINI_KEY = os.getenv("GEMINI_KEY")
+# UPDATED TO MATCH YOUR .ENV NAMES
+TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 
 if not TG_TOKEN or not GEMINI_KEY:
-    logger.critical("❌ ERROR: API Keys missing. Set TG_TOKEN and GEMINI_KEY env vars.")
+    logger.critical("❌ ERROR: API Keys missing. Check TELEGRAM_TOKEN and GEMINI_API_KEY.")
     sys.exit(1)
 
 # Configure Gemini
@@ -358,14 +376,9 @@ def run_whisper_engine(audio_path, srt_path, txt_path, mode="sub"):
 def run_gemini_transcribe(audio_path, srt_path, txt_path):
     try:
         model = genai.GenerativeModel('gemini-1.5-flash')
-        # Uploading audio to Gemini (or sending bytes directly if supported by method)
-        # Note: For large files, File API is better, but here we use simple content generation
-        # Only works well for small audio in direct bytes.
         with open(audio_path, "rb") as f:
             audio_bytes = f.read()
             
-        # Using a simpler text prompt if byte upload is restricted or managing file upload
-        # For this script we will assume simple byte passing or use Whisper as primary.
         response = model.generate_content([
             "Transcribe this audio accurately.",
             {"mime_type": "audio/mp3", "data": audio_bytes}
@@ -784,6 +797,9 @@ async def end_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == "__main__":
     logger.info("Starting Video AI Bot")
     try:
+        # Start Dummy Health Server (Background)
+        threading.Thread(target=start_health_server, daemon=True).start()
+
         app = ApplicationBuilder().token(TG_TOKEN).post_init(post_init).build()
 
         app.add_handler(CommandHandler("start", start))
