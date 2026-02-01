@@ -32,8 +32,11 @@ try:
     import edge_tts
     from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
     from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
-    from google import genai
-    from google.genai import types
+    
+    # --- FIXED IMPORT FOR GOOGLE AI ---
+    import google.generativeai as genai
+    # ----------------------------------
+
     from faster_whisper import WhisperModel
     logger.info("✅ All libraries imported.")
 except ImportError as e:
@@ -50,6 +53,9 @@ if not TG_TOKEN or not GEMINI_KEY:
     logger.critical("❌ ERROR: API Keys missing. Set TG_TOKEN and GEMINI_KEY env vars.")
     sys.exit(1)
 
+# Configure Gemini
+genai.configure(api_key=GEMINI_KEY)
+
 VOICE_LIB = {
     "🇲🇲 Thiha (Male)": "my-MM-ThihaNeural",
     "🇲🇲 Nilar (Female)": "my-MM-NilarNeural",
@@ -64,7 +70,6 @@ VOICE_LIB = {
     "🇹🇭 Premwadee (Thai)": "th-TH-PremwadeeNeural",
 }
 
-# Generic Rules for SRT Formatting (Language Agnostic)
 SRT_RULES = """
 **FORMATTING INSTRUCTIONS (STRICT):**
 1. The input is an **SRT Subtitle File**.
@@ -352,17 +357,24 @@ def run_whisper_engine(audio_path, srt_path, txt_path, mode="sub"):
 
 def run_gemini_transcribe(audio_path, srt_path, txt_path):
     try:
-        client = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        # Uploading audio to Gemini (or sending bytes directly if supported by method)
+        # Note: For large files, File API is better, but here we use simple content generation
+        # Only works well for small audio in direct bytes.
         with open(audio_path, "rb") as f:
             audio_bytes = f.read()
-        response = client.generate_content([
-            types.Part.from_bytes(data=audio_bytes, mime_type="audio/mp3"),
-            types.Part.from_text(text="Transcribe this audio accurately.")
+            
+        # Using a simpler text prompt if byte upload is restricted or managing file upload
+        # For this script we will assume simple byte passing or use Whisper as primary.
+        response = model.generate_content([
+            "Transcribe this audio accurately.",
+            {"mime_type": "audio/mp3", "data": audio_bytes}
         ])
+        
         text = response.text.strip()
         with open(txt_path, "w", encoding="utf-8") as f:
             f.write(text)
-        if os.path.exists(srt_path): os.remove(srt_path) # Gemini flash doesn't do timestamps well
+        if os.path.exists(srt_path): os.remove(srt_path)
         return "Gemini Flash"
     except Exception as e:
         logger.error(f"Gemini transcribe error: {e}")
@@ -378,7 +390,7 @@ async def run_translate(user_id, prompt_text):
         return False, "No transcription found.", None
 
     is_srt = source.endswith('.srt')
-    client = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash')
 
     with open(source, "r", encoding="utf-8") as f:
         content = f.read()
@@ -391,7 +403,7 @@ async def run_translate(user_id, prompt_text):
         ext = ".txt"
 
     try:
-        response = client.generate_content(full_prompt)
+        response = model.generate_content(full_prompt)
         result = response.text.strip().replace("```srt", "").replace("```", "").strip()
         out_path = p['trans_result'] + ext
         with open(out_path, "w", encoding="utf-8") as f:
@@ -411,10 +423,10 @@ async def run_chat_gemini(user_id, text):
     if user_id not in chat_histories:
         chat_histories[user_id] = []
 
-    client = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash')
 
     try:
-        chat = client.start_chat(history=chat_histories[user_id])
+        chat = model.start_chat(history=chat_histories[user_id])
         response = chat.send_message(text)
         chat_histories[user_id] = chat.history
         return response.text
