@@ -5,3 +5,4 @@ edge-tts
 pysrt
 faster-whisper
 yt-dlp
+ffmpeg-python
