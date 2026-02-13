@@ -1,8 +1,9 @@
 python-telegram-bot
 google-generativeai
-pydub
 edge-tts
-pysrt
+pydub
 faster-whisper
+pysrt
 yt-dlp
-ffmpeg-python
+torch
+torchaudio
