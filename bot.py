@@ -594,7 +594,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🗜️ USER CLICKED COMPRESS
     elif data == "do_compress":
         status = await query.message.edit_text("⏳ ဗီဒီယိုကို Size သေးအောင် ချုံ့နေပါတယ်။ (အချိန် အနည်းငယ်ကြာနိုင်ပါသည်)...")
-        comp_cmd = ["ffmpeg", "-y", "-i", p['final_video'], "-c:v", "libx264", "-crf", "32", "-preset", "veryfast", "-c:a", "aac", p['compressed']]
+        # ⚠️ Compress လုပ်ရာတွင်လည်း ultrafast နှင့် threads 1 ကိုသာ သုံးပါမည်
+        comp_cmd = ["ffmpeg", "-y", "-i", p['final_video'], "-c:v", "libx264", "-crf", "34", "-preset", "ultrafast", "-threads", "1", "-c:a", "aac", p['compressed']]
         try:
             await run_async_cmd(*comp_cmd)
             comp_size = os.path.getsize(p['compressed']) / (1024 * 1024)
@@ -609,6 +610,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status.edit_text(f"❌ Compress Error: {e}")
             
         wipe_all_user_data(user_id)
+
 
     # 🎧 USER CLICKED AUDIO ONLY
     elif data == "send_audio_only":
