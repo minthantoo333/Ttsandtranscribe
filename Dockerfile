@@ -1,11 +1,18 @@
 # Use Python 3.10 slim image
 FROM python:3.10-slim
 
-# Install system dependencies (FFmpeg is crucial here)
+# Install system dependencies (FFmpeg and Fonts are crucial here)
 RUN apt-get update && \
-    apt-get install -y ffmpeg git && \
+    apt-get install -y \
+    ffmpeg \
+    git \
+    fontconfig \
+    fonts-noto \
+    fonts-noto-cjk \
+    fonts-padauk && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    fc-cache -fv
 
 # Set working directory
 WORKDIR /app
