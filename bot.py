@@ -13,7 +13,6 @@ import sys
 import threading
 import hashlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from io import StringIO
 
 # -------------------------------------------------------------------------
 # LOGGING SETUP
@@ -33,17 +32,17 @@ try:
     import google.generativeai as genai 
     from faster_whisper import WhisperModel
 except ImportError as e:
-    logger.critical(f"❌ Missing Library: {e}")
+    logger.critical(f"❌ Missing Library: {e}. Please run pip install -r requirements.txt")
     sys.exit(1)
 
 # -------------------------------------------------------------------------
-# DUMMY SERVER (To keep bot alive)
+# DUMMY SERVER (To keep bot alive on Render/Heroku)
 # -------------------------------------------------------------------------
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is running!")
+        self.wfile.write(b"Bot is running! - Pro Video AI 2026")
 
 def start_health_server():
     port = int(os.environ.get("PORT", 10000))
@@ -63,7 +62,12 @@ if not TG_TOKEN:
 if GEMINI_KEY:
     genai.configure(api_key=GEMINI_KEY)
 
-# --- FULL VOICE ROSTER (From Code B) ---
+# UPGRADE: Auto-detect GPU vs CPU for faster processing
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
+logger.info(f"🚀 AI Engine running on: {DEVICE.upper()} (Compute: {COMPUTE_TYPE})")
+
+# --- FULL VOICE ROSTER ---
 VOICE_LIB = {
     "🇲🇲 Thiha (Male)": "my-MM-ThihaNeural",
     "🇲🇲 Nilar (Female)": "my-MM-NilarNeural",
@@ -88,27 +92,10 @@ SPEAKER_ALIASES = {
     "nanami": "ja-JP-NanamiNeural", "keita": "ja-JP-KeitaNeural"
 }
 
-# --- AUDIO ENGINE SETTINGS (From Code B) ---
-SPEED_LIB = {
-    "🤖 Auto-Sync": "auto",
-    "1.0x (Normal)": 1.0,
-    "0.9x (Slow)": 0.9,
-    "0.8x (Slower)": 0.8
-}
-
-RATE_LIB = {
-    "🐢 -10%": "-10%",
-    "🚶 +0%": "+0%",
-    "🏃 +10%": "+10%",
-    "🏎️ +20%": "+20%",
-    "🚀 +30%": "+30%"
-}
-
-FIT_LIB = {
-    "🗜️ Max +50%": 50,
-    "🗜️ Max +60%": 60,
-    "🗜️ Max +70%": 70
-}
+# --- AUDIO ENGINE SETTINGS ---
+SPEED_LIB = {"🤖 Auto-Sync": "auto", "1.0x (Normal)": 1.0, "0.9x (Slow)": 0.9, "0.8x (Slower)": 0.8}
+RATE_LIB = {"🐢 -10%": "-10%", "🚶 +0%": "+0%", "🏃 +10%": "+10%", "🏎️ +20%": "+20%", "🚀 +30%": "+30%"}
+FIT_LIB = {"🗜️ Max +50%": 50, "🗜️ Max +60%": 60, "🗜️ Max +70%": 70}
 
 SRT_RULES = """
 **FORMATTING INSTRUCTIONS:**
@@ -132,8 +119,7 @@ def get_user_state(user_id):
             "dub_voice": "my-MM-ThihaNeural",
             "video_speed": "auto", 
             "base_rate": "+20%",
-            "max_fit": 70,
-            "custom_prompts": {}
+            "max_fit": 70
         }
     return user_prefs[user_id]
 
@@ -148,13 +134,11 @@ def get_paths(user_id):
     }
 
 def clean_temp_audio(user_id):
-    """Clears only temporary TTS chunks, keeps Video and SRT safe."""
     for f in glob.glob(f"temp/{user_id}_*"):
         try: os.remove(f)
         except: pass
 
 def wipe_all_user_data(user_id):
-    """Wipes everything completely."""
     clean_temp_audio(user_id)
     p = get_paths(user_id)
     for path in p.values():
@@ -175,10 +159,9 @@ async def run_async_cmd(*cmd):
     return stdout.decode('utf-8', errors='ignore')
 
 # -------------------------------------------------------------------------
-# ADVANCED AUDIO ENGINE (Two-Phase Native Speed)
+# ADVANCED AUDIO ENGINE
 # -------------------------------------------------------------------------
-def get_audio_hash(text, voice, rate):
-    return hashlib.md5(f"{text}|{voice}|{rate}".encode()).hexdigest()
+def get_audio_hash(text, voice, rate): return hashlib.md5(f"{text}|{voice}|{rate}".encode()).hexdigest()
 
 def trim_silence(audio_segment, silence_thresh=-40.0, chunk_size=5):
     if len(audio_segment) < 100: return audio_segment
@@ -228,21 +211,19 @@ async def measure_base_chunk(chunk, user_id, base_rate_str, semaphore, progress_
         audio_hash = get_audio_hash(text, voice, base_rate_str)
         path = f"temp/{user_id}_{audio_hash}.mp3"
         
-        if os.path.exists(path):
-            length = await asyncio.to_thread(process_length_and_trim, path)
-            await progress_cb()
-            return {"index": idx, "len": length, "path": path, "text": text, "voice": voice}
-
-        for attempt in range(3):
-            try:
-                comm = edge_tts.Communicate(text, voice, rate=base_rate_str, pitch="-2Hz")
-                await comm.save(path)
-                length = await asyncio.to_thread(process_length_and_trim, path)
-                await progress_cb()
-                return {"index": idx, "len": length, "path": path, "text": text, "voice": voice}
-            except Exception:
-                if attempt == 2: return {"index": idx, "len": 0, "path": None, "text": "", "voice": voice}
-                await asyncio.sleep(1)
+        if not os.path.exists(path):
+            for attempt in range(3):
+                try:
+                    comm = edge_tts.Communicate(text, voice, rate=base_rate_str, pitch="-2Hz")
+                    await comm.save(path)
+                    break
+                except Exception:
+                    if attempt == 2: return {"index": idx, "len": 0, "path": None, "text": "", "voice": voice}
+                    await asyncio.sleep(1)
+                    
+        length = await asyncio.to_thread(process_length_and_trim, path)
+        await progress_cb()
+        return {"index": idx, "len": length, "path": path, "text": text, "voice": voice}
 
 async def process_final_chunk(chunk, base_res, global_ratio, user_id, base_rate_int, max_fit, semaphore, progress_cb):
     async with semaphore:
@@ -268,22 +249,21 @@ async def process_final_chunk(chunk, base_res, global_ratio, user_id, base_rate_
         audio_hash = get_audio_hash(text, voice, rate_str)
         final_path = f"temp/{user_id}_{audio_hash}.mp3"
         
-        if os.path.exists(final_path):
-            await progress_cb()
-            return (new_start_ms, final_path)
-
-        for attempt in range(3):
-            try:
-                comm = edge_tts.Communicate(text, voice, rate=rate_str, pitch="-2Hz")
-                await comm.save(final_path)
-                await asyncio.to_thread(process_length_and_trim, final_path)
-                await progress_cb()
-                return (new_start_ms, final_path)
-            except Exception:
-                if attempt == 2: 
-                    await progress_cb()
-                    return (new_start_ms, base_path) 
-                await asyncio.sleep(1)
+        if not os.path.exists(final_path):
+            for attempt in range(3):
+                try:
+                    comm = edge_tts.Communicate(text, voice, rate=rate_str, pitch="-2Hz")
+                    await comm.save(final_path)
+                    await asyncio.to_thread(process_length_and_trim, final_path)
+                    break
+                except Exception:
+                    if attempt == 2: 
+                        await progress_cb()
+                        return (new_start_ms, base_path) 
+                    await asyncio.sleep(1)
+                    
+        await progress_cb()
+        return (new_start_ms, final_path)
 
 async def generate_advanced_dubbing(user_id, srt_path, output_path, state, status_msg):
     try:
@@ -309,15 +289,21 @@ async def generate_advanced_dubbing(user_id, srt_path, output_path, state, statu
         total_tasks = len(chunks_data) * 2
         completed_tasks = 0
         last_update_time = time.time()
+        last_posted_text = ""
 
+        # UPGRADE: Anti-FloodWait safe edit method
         async def update_progress(phase_name):
-            nonlocal completed_tasks, last_update_time
+            nonlocal completed_tasks, last_update_time, last_posted_text
             completed_tasks += 1
             now = time.time()
-            if now - last_update_time > 2.0 or completed_tasks == total_tasks:
+            if now - last_update_time > 2.5 or completed_tasks == total_tasks:
                 percent = int((completed_tasks / total_tasks) * 100)
-                try: await status_msg.edit_text(f"🎬 **{phase_name}...**\n⏳ **Processing: {percent}%**")
-                except: pass
+                new_text = f"🎬 **{phase_name}...**\n⏳ **Processing: {percent}%**"
+                if new_text != last_posted_text:
+                    try: 
+                        await status_msg.edit_text(new_text)
+                        last_posted_text = new_text
+                    except Exception: pass
                 last_update_time = now
 
         semaphore = asyncio.Semaphore(15) 
@@ -391,23 +377,27 @@ def format_timestamp(seconds):
 
 def run_whisper_engine(audio_path, srt_path):
     try:
-        # Optimized for Render Free Tier (Base Model + 2 Threads)
-        model = WhisperModel("base", device="cpu", compute_type="int8", cpu_threads=2)
-        segments, _ = model.transcribe(audio_path, beam_size=5, vad_filter=True, word_timestamps=True)
+        # UPGRADE: Utilize Hardware Acceleration & Anti-Hallucination
+        model = WhisperModel("base", device=DEVICE, compute_type=COMPUTE_TYPE, cpu_threads=4)
+        segments, _ = model.transcribe(
+            audio_path, beam_size=5, vad_filter=True, 
+            word_timestamps=True, condition_on_previous_text=False # Crucial for stopping repeat loops
+        )
         
         with open(srt_path, "w", encoding="utf-8") as srt:
             for i, seg in enumerate(segments, 1):
                 srt.write(f"{i}\n{format_timestamp(seg.start)} --> {format_timestamp(seg.end)}\n{seg.text.strip()}\n\n")
-        return "Whisper Base"
+        return "Whisper Base (Accelerated)"
     except Exception as e:
         return f"Error: {e}"
 
 async def run_translate(user_id, prompt_text):
     p = get_paths(user_id)
     if not os.path.exists(p['srt']): return False, "No SRT found.", None
-    if not GEMINI_KEY: return False, "GEMINI_API_KEY missing in Render.", None
+    if not GEMINI_KEY: return False, "GEMINI_API_KEY missing.", None
 
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # UPGRADE: Updated model to 2026 specs
+    model = genai.GenerativeModel('gemini-3.5-flash')
     with open(p['srt'], "r", encoding="utf-8") as f: content = f.read()
 
     full_prompt = f"{prompt_text}\n\n**INPUT SRT:**\n{content}"
@@ -452,7 +442,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = get_user_state(user_id)
     text = (
         "⚙️ **STUDIO SETTINGS**\nConfigure your AI narrator and speed limits.\n\n"
-        "*(Fast-Track: Upload your Video -> Upload your SRT -> Click Dub)*"
+        "*(Fast-Track: Paste a YouTube link, or upload a Video/SRT file directly!)*"
     )
     if update.callback_query:
         await update.callback_query.message.edit_text(text, reply_markup=get_settings_keyboard(state))
@@ -514,13 +504,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 merge_success, merge_res = await merge_video_audio(user_id)
                 await status.delete()
                 if merge_success:
-                    try: await context.bot.send_video(query.message.chat_id, open(merge_res, "rb"), caption="🎬 Final Dubbed Video", supports_streaming=True)
-                    except: await context.bot.send_audio(query.message.chat_id, open(p['dub_audio'], "rb"), caption="Video too large. Audio sent instead.")
+                    try: 
+                        await context.bot.send_video(query.message.chat_id, open(merge_res, "rb"), caption="🎬 Final Dubbed Video", supports_streaming=True)
+                    except: 
+                        await context.bot.send_audio(query.message.chat_id, open(p['dub_audio'], "rb"), caption="⚠️ Video size exceeds Telegram limits. Audio sent instead.")
                 else:
                     await context.bot.send_audio(query.message.chat_id, open(p['dub_audio'], "rb"), caption="❌ Video merge failed. Audio sent instead.")
             else:
                 await status.delete()
                 await context.bot.send_audio(query.message.chat_id, open(p['dub_audio'], "rb"), caption="🎧 Advanced Dubbed Audio")
+            
+            # UPGRADE: Smart Cleanup after send
+            wipe_all_user_data(user_id)
+            await context.bot.send_message(query.message.chat_id, "🧹 Workspace automatically cleaned to save space.")
         else:
             await status.edit_text(f"❌ Dubbing Failed: {error}")
 
@@ -533,7 +529,7 @@ async def process_media(update, context, is_url):
 
     status = await msg.reply_text("⏳ Processing Media...")
     try:
-        # Wipe ONLY if it's a completely new video process to avoid messing up manual SRTs
+        # Wipe ONLY if it's a completely new video process
         if os.path.exists(p['srt']): os.remove(p['srt'])
         clean_temp_audio(user_id)
         has_subs = False
@@ -576,9 +572,13 @@ async def process_media(update, context, is_url):
             await context.bot.send_document(msg.chat_id, document=open(p['srt'], "rb"), caption=caption)
 
         await status.edit_text("✅ Download & Transcription Done.\nChoose Translation Language (Or upload custom SRT):")
+        
+        # UPGRADE: Expanded Translation Grid
         kb = [
             [InlineKeyboardButton("🇲🇲 Burmese", callback_data="trans_burmese"), InlineKeyboardButton("🇯🇵 Japanese", callback_data="trans_japanese")],
-            [InlineKeyboardButton("🎬 Process Pro Dubbing", callback_data="trigger_dub")]
+            [InlineKeyboardButton("🇬🇧 English", callback_data="trans_english"), InlineKeyboardButton("🇨🇳 Chinese", callback_data="trans_chinese")],
+            [InlineKeyboardButton("🇰🇷 Korean", callback_data="trans_korean"), InlineKeyboardButton("🇪🇸 Spanish", callback_data="trans_spanish")],
+            [InlineKeyboardButton("🎬 Skip Translation (Dub Direct)", callback_data="trigger_dub")]
         ]
         await context.bot.send_message(msg.chat_id, "Next Action:", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -587,10 +587,10 @@ async def process_media(update, context, is_url):
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    if "http" in text and any(x in text.lower() for x in ["youtube.com", "youtu.be", "tiktok.com", "facebook.com"]):
+    if "http" in text and any(x in text.lower() for x in ["youtube.com", "youtu.be", "tiktok.com", "facebook.com", "instagram.com"]):
         await process_media(update, context, is_url=True)
     else:
-        await update.message.reply_text("ℹ️ Please send a YouTube link, Video file, or SRT file.")
+        await update.message.reply_text("ℹ️ Please send a YouTube/TikTok link, Video file, or SRT file.\nUse /start to adjust settings.")
 
 async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -601,7 +601,6 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await (await msg.document.get_file()).download_to_drive(p['srt'])
         kb = [[InlineKeyboardButton("🎬 Process Pro Dubbing", callback_data="trigger_dub")]]
         
-        # Check if they already uploaded a video
         if os.path.exists(p['input']):
             await msg.reply_text("✅ **Custom SRT Loaded over existing Video!**\nHit Dub below to start rendering.", reply_markup=InlineKeyboardMarkup(kb))
         else:
@@ -611,11 +610,14 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process_media(update, context, is_url=False)
 
 if __name__ == "__main__":
-    logger.info("Starting Final Pro Video AI Bot")
+    logger.info("Starting Final Pro Video AI Bot (v2026)")
     try:
         threading.Thread(target=start_health_server, daemon=True).start()
         app = ApplicationBuilder().token(TG_TOKEN).build()
+        
         app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("settings", start)) # Alias for start
+        
         app.add_handler(CallbackQueryHandler(callback_handler))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
         app.add_handler(MessageHandler(filters.VIDEO | filters.Document.ALL | filters.AUDIO, file_handler))
