@@ -9,7 +9,7 @@ RUN apt-get update && \
     fontconfig \
     fonts-noto \
     fonts-noto-cjk \
-    fonts-padauk && \
+    fonts-sil-padauk && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
     fc-cache -fv
@@ -24,7 +24,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the bot code
 COPY . .
 
-# Expose the port (Render sets this ENV variable automatically, but good practice)
+# Expose the port
 EXPOSE 10000
 
 # Run the bot
