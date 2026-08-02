@@ -42,7 +42,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is running! - Pro Video AI 2026")
+        self.wfile.write(b"Bot is running! - Pro Video AI")
 
 def start_health_server():
     port = int(os.environ.get("PORT", 10000))
@@ -62,10 +62,17 @@ if not TG_TOKEN:
 if GEMINI_KEY:
     genai.configure(api_key=GEMINI_KEY)
 
-# UPGRADE: Auto-detect GPU vs CPU for faster processing
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
 logger.info(f"🚀 AI Engine running on: {DEVICE.upper()} (Compute: {COMPUTE_TYPE})")
+
+# --- WHISPER MODELS ---
+WHISPER_LIB = {
+    "⚡ Tiny (Render Safe - 150MB)": "tiny",
+    "⚖️ Base (Standard - 300MB)": "base",
+    "🎯 Small (Better - 1GB)": "small",
+    "🧠 Medium (Heavy - 3GB)": "medium"
+}
 
 # --- FULL VOICE ROSTER ---
 VOICE_LIB = {
@@ -119,7 +126,9 @@ def get_user_state(user_id):
             "dub_voice": "my-MM-ThihaNeural",
             "video_speed": "auto", 
             "base_rate": "+20%",
-            "max_fit": 70
+            "max_fit": 70,
+            "whisper_model": "tiny", # Default to 'tiny' for Render stability
+            "ask_srt_workflow": False # Off = Fast-track auto transcribe; On = Asks user first
         }
     return user_prefs[user_id]
 
@@ -291,7 +300,6 @@ async def generate_advanced_dubbing(user_id, srt_path, output_path, state, statu
         last_update_time = time.time()
         last_posted_text = ""
 
-        # UPGRADE: Anti-FloodWait safe edit method
         async def update_progress(phase_name):
             nonlocal completed_tasks, last_update_time, last_posted_text
             completed_tasks += 1
@@ -375,19 +383,19 @@ def format_timestamp(seconds):
     millis = round((seconds - math.floor(seconds)) * 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
-def run_whisper_engine(audio_path, srt_path):
+def run_whisper_engine(audio_path, srt_path, model_name="tiny"):
     try:
-        # UPGRADE: Utilize Hardware Acceleration & Anti-Hallucination
-        model = WhisperModel("base", device=DEVICE, compute_type=COMPUTE_TYPE, cpu_threads=4)
+        logger.info(f"Running Whisper Model: {model_name}")
+        model = WhisperModel(model_name, device=DEVICE, compute_type=COMPUTE_TYPE, cpu_threads=2)
         segments, _ = model.transcribe(
-            audio_path, beam_size=5, vad_filter=True, 
-            word_timestamps=True, condition_on_previous_text=False # Crucial for stopping repeat loops
+            audio_path, beam_size=3, vad_filter=True, 
+            word_timestamps=True, condition_on_previous_text=False
         )
         
         with open(srt_path, "w", encoding="utf-8") as srt:
             for i, seg in enumerate(segments, 1):
                 srt.write(f"{i}\n{format_timestamp(seg.start)} --> {format_timestamp(seg.end)}\n{seg.text.strip()}\n\n")
-        return "Whisper Base (Accelerated)"
+        return f"Whisper ({model_name.upper()})"
     except Exception as e:
         return f"Error: {e}"
 
@@ -396,7 +404,6 @@ async def run_translate(user_id, prompt_text):
     if not os.path.exists(p['srt']): return False, "No SRT found.", None
     if not GEMINI_KEY: return False, "GEMINI_API_KEY missing.", None
 
-    # UPGRADE: Updated model to 2026 specs
     model = genai.GenerativeModel('gemini-3.5-flash')
     with open(p['srt'], "r", encoding="utf-8") as f: content = f.read()
 
@@ -410,22 +417,33 @@ async def run_translate(user_id, prompt_text):
     except Exception as e:
         return False, str(e), None
 
+def get_translation_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🇲🇲 Burmese", callback_data="trans_burmese"), InlineKeyboardButton("🇯🇵 Japanese", callback_data="trans_japanese")],
+        [InlineKeyboardButton("🇬🇧 English", callback_data="trans_english"), InlineKeyboardButton("🇨🇳 Chinese", callback_data="trans_chinese")],
+        [InlineKeyboardButton("🇰🇷 Korean", callback_data="trans_korean"), InlineKeyboardButton("🇪🇸 Spanish", callback_data="trans_spanish")],
+        [InlineKeyboardButton("🎬 Process Pro Dubbing", callback_data="trigger_dub")]
+    ])
+
 # -------------------------------------------------------------------------
 # TELEGRAM HANDLERS & MENUS
 # -------------------------------------------------------------------------
 def get_settings_keyboard(state):
     v_name = next((k for k, v in VOICE_LIB.items() if v == state['dub_voice']), "Voice")
     s_name = next((k for k, v in SPEED_LIB.items() if v == state['video_speed']), f"{state['video_speed']}x")
-    r_name = next((k for k, v in RATE_LIB.items() if v == state['base_rate']), state['base_rate'])
-    f_name = f"+{state['max_fit']}%"
+    w_name = next((k for k, v in WHISPER_LIB.items() if v == state['whisper_model']), state['whisper_model'])
+    ask_srt_status = "🟢 ON (Ask First)" if state['ask_srt_workflow'] else "🔴 OFF (Auto-Transcribe)"
+
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"🗣️ Voice: {v_name}", callback_data="cmd_voices")],
-        [InlineKeyboardButton(f"🎙️ Rate: {r_name}", callback_data="cmd_rate"), InlineKeyboardButton(f"🗜️ Fit: {f_name}", callback_data="cmd_fit")],
+        [InlineKeyboardButton(f"🧠 Whisper: {w_name}", callback_data="cmd_whisper")],
+        [InlineKeyboardButton(f"❓ Prompt SRT Upload: {ask_srt_status}", callback_data="toggle_ask_srt")],
+        [InlineKeyboardButton(f"🎙️ Rate: {state['base_rate']}", callback_data="cmd_rate"), InlineKeyboardButton(f"🗜️ Fit: +{state['max_fit']}%", callback_data="cmd_fit")],
         [InlineKeyboardButton(f"⏱️ Video Speed: {s_name}", callback_data="cmd_speed")],
         [InlineKeyboardButton("🧹 Clear Workspace", callback_data="cmd_clear")]
     ])
 
-async def handle_menu(update, lib, prefix, text_msg, columns=2):
+async def handle_menu(update, lib, prefix, text_msg, columns=1):
     keyboard, row = [], []
     for name, val in lib.items():
         row.append(InlineKeyboardButton(name, callback_data=f"{prefix}_{val}"))
@@ -441,13 +459,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     state = get_user_state(user_id)
     text = (
-        "⚙️ **STUDIO SETTINGS**\nConfigure your AI narrator and speed limits.\n\n"
-        "*(Fast-Track: Paste a YouTube link, or upload a Video/SRT file directly!)*"
+        "⚙️ **STUDIO SETTINGS**\nConfigure your AI narrator, Whisper model, and workflows.\n\n"
+        "💡 *Render Tip:* Keep Whisper set to **Tiny** to prevent Render RAM crashes."
     )
     if update.callback_query:
         await update.callback_query.message.edit_text(text, reply_markup=get_settings_keyboard(state))
     else:
         await update.message.reply_text(text, reply_markup=get_settings_keyboard(state))
+
+async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Directly translate an uploaded SRT file using /translate"""
+    user_id = update.effective_user.id
+    p = get_paths(user_id)
+    if not os.path.exists(p['srt']):
+        return await update.message.reply_text("❌ No SRT file found. Upload an `.srt` file first, then run /translate.")
+    
+    await update.message.reply_text("🌐 Choose Translation Language for your SRT:", reply_markup=get_translation_keyboard())
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -463,19 +490,36 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Sub-menus
     elif data == "cmd_voices": await handle_menu(update, VOICE_LIB, "set_voice", "🗣️ **Select Narrator Voice:**", 2)
+    elif data == "cmd_whisper": await handle_menu(update, WHISPER_LIB, "set_whisper", "🧠 **Select Whisper Model:**\n*(Choose 'tiny' for low-memory environments like Render)*", 1)
     elif data == "cmd_rate": await handle_menu(update, RATE_LIB, "set_rate", "🎙️ **Select Base TTS Speak Rate:**", 3)
     elif data == "cmd_fit": await handle_menu(update, FIT_LIB, "set_fit", "🗜️ **Select Max Emergency Squeeze Speed:**", 3)
     elif data == "cmd_speed": await handle_menu(update, SPEED_LIB, "set_speed", "⏱️ **Select Video Speed Mode:**", 2)
     
+    # Toggles
+    elif data == "toggle_ask_srt":
+        state['ask_srt_workflow'] = not state['ask_srt_workflow']
+        await start(update, context)
+
     # Menu Setters
     elif data.startswith("set_"):
         if data.startswith("set_voice_"): state['dub_voice'] = data.replace("set_voice_", "")
+        elif data.startswith("set_whisper_"): state['whisper_model'] = data.replace("set_whisper_", "")
         elif data.startswith("set_rate_"): state['base_rate'] = data.replace("set_rate_", "")
         elif data.startswith("set_fit_"): state['max_fit'] = int(data.replace("set_fit_", ""))
         elif data.startswith("set_speed_"): 
             val = data.replace("set_speed_", "")
             state['video_speed'] = "auto" if val == "auto" else float(val)
         await start(update, context)
+
+    # Manual workflow triggers
+    elif data == "run_auto_transcribe":
+        p = get_paths(user_id)
+        status = await query.message.reply_text(f"🎙️ Transcribing Audio with Whisper AI ({state['whisper_model'].upper()})...")
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, run_whisper_engine, p['audio'], p['srt'], state['whisper_model'])
+        if os.path.exists(p['srt']):
+            await context.bot.send_document(query.message.chat_id, document=open(p['srt'], "rb"), caption="✅ Transcribed by Whisper AI")
+        await status.edit_text("✅ Transcription Complete.\nChoose Translation Language:", reply_markup=get_translation_keyboard())
 
     # Actions
     elif data.startswith("trans_"):
@@ -514,7 +558,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status.delete()
                 await context.bot.send_audio(query.message.chat_id, open(p['dub_audio'], "rb"), caption="🎧 Advanced Dubbed Audio")
             
-            # UPGRADE: Smart Cleanup after send
             wipe_all_user_data(user_id)
             await context.bot.send_message(query.message.chat_id, "🧹 Workspace automatically cleaned to save space.")
         else:
@@ -525,11 +568,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def process_media(update, context, is_url):
     msg = update.message
     user_id = msg.from_user.id
+    state = get_user_state(user_id)
     p = get_paths(user_id)
 
     status = await msg.reply_text("⏳ Processing Media...")
     try:
-        # Wipe ONLY if it's a completely new video process
         if os.path.exists(p['srt']): os.remove(p['srt'])
         clean_temp_audio(user_id)
         has_subs = False
@@ -560,27 +603,28 @@ async def process_media(update, context, is_url):
             await file.download_to_drive(p['input'])
             await run_async_cmd("ffmpeg", "-y", "-i", p['input'], "-vn", "-acodec", "libmp3lame", "-q:a", "2", p['audio'])
 
-        if not has_subs:
-            await status.edit_text("🎙️ Transcribing Audio with Whisper AI (Base Model)...")
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, run_whisper_engine, p['audio'], p['srt'])
-            caption = "✅ Transcribed by Whisper AI"
+        if has_subs:
+            await context.bot.send_document(msg.chat_id, document=open(p['srt'], "rb"), caption="✅ Extracted YouTube Auto-Subtitles")
+            await status.edit_text("✅ Download & Transcription Done.\nChoose Translation Language:", reply_markup=get_translation_keyboard())
+            return
+
+        # CHECK IF "ASK SRT WORKFLOW" IS ENABLED
+        if state['ask_srt_workflow']:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎙️ Transcribe with Whisper AI", callback_data="run_auto_transcribe")],
+                [InlineKeyboardButton("📤 I will upload custom SRT", callback_data="cmd_start")]
+            ])
+            await status.edit_text("✅ Video Downloaded! Choose how you want to handle subtitles:", reply_markup=kb)
         else:
-            caption = "✅ Extracted YouTube Auto-Subtitles"
+            # FAST TRACK: Auto-transcribe using chosen Whisper model
+            await status.edit_text(f"🎙️ Transcribing Audio with Whisper AI ({state['whisper_model'].upper()})...")
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, run_whisper_engine, p['audio'], p['srt'], state['whisper_model'])
+            
+            if os.path.exists(p['srt']):
+                await context.bot.send_document(msg.chat_id, document=open(p['srt'], "rb"), caption=f"✅ Transcribed by Whisper AI ({state['whisper_model'].upper()})")
 
-        if os.path.exists(p['srt']):
-            await context.bot.send_document(msg.chat_id, document=open(p['srt'], "rb"), caption=caption)
-
-        await status.edit_text("✅ Download & Transcription Done.\nChoose Translation Language (Or upload custom SRT):")
-        
-        # UPGRADE: Expanded Translation Grid
-        kb = [
-            [InlineKeyboardButton("🇲🇲 Burmese", callback_data="trans_burmese"), InlineKeyboardButton("🇯🇵 Japanese", callback_data="trans_japanese")],
-            [InlineKeyboardButton("🇬🇧 English", callback_data="trans_english"), InlineKeyboardButton("🇨🇳 Chinese", callback_data="trans_chinese")],
-            [InlineKeyboardButton("🇰🇷 Korean", callback_data="trans_korean"), InlineKeyboardButton("🇪🇸 Spanish", callback_data="trans_spanish")],
-            [InlineKeyboardButton("🎬 Skip Translation (Dub Direct)", callback_data="trigger_dub")]
-        ]
-        await context.bot.send_message(msg.chat_id, "Next Action:", reply_markup=InlineKeyboardMarkup(kb))
+            await status.edit_text("✅ Download & Transcription Done.\nChoose Translation Language:", reply_markup=get_translation_keyboard())
 
     except Exception as e:
         await status.edit_text(f"❌ Error: {str(e)[:200]}")
@@ -590,7 +634,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "http" in text and any(x in text.lower() for x in ["youtube.com", "youtu.be", "tiktok.com", "facebook.com", "instagram.com"]):
         await process_media(update, context, is_url=True)
     else:
-        await update.message.reply_text("ℹ️ Please send a YouTube/TikTok link, Video file, or SRT file.\nUse /start to adjust settings.")
+        await update.message.reply_text("ℹ️ Please send a YouTube/TikTok link, Video file, or SRT file.\nUse /start to adjust settings or /translate to translate an SRT.")
 
 async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -599,24 +643,25 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if msg.document and msg.document.file_name.lower().endswith('.srt'):
         await (await msg.document.get_file()).download_to_drive(p['srt'])
-        kb = [[InlineKeyboardButton("🎬 Process Pro Dubbing", callback_data="trigger_dub")]]
         
+        # Immediate Translation Keyboard for Direct SRT Uploads
         if os.path.exists(p['input']):
-            await msg.reply_text("✅ **Custom SRT Loaded over existing Video!**\nHit Dub below to start rendering.", reply_markup=InlineKeyboardMarkup(kb))
+            await msg.reply_text("✅ **Custom SRT Loaded over existing Video!**\nSelect target translation language or process dubbing:", reply_markup=get_translation_keyboard())
         else:
-            await msg.reply_text("✅ **Custom SRT Loaded!**\n⚠️ No video found. Upload a video first, then upload this SRT again if you want a final video output. Or click Dub for Audio only.", reply_markup=InlineKeyboardMarkup(kb))
+            await msg.reply_text("✅ **Custom SRT Loaded!**\nTranslate it now or process audio-only dubbing:", reply_markup=get_translation_keyboard())
         return
 
     await process_media(update, context, is_url=False)
 
 if __name__ == "__main__":
-    logger.info("Starting Final Pro Video AI Bot (v2026)")
+    logger.info("Starting Final Pro Video AI Bot")
     try:
         threading.Thread(target=start_health_server, daemon=True).start()
         app = ApplicationBuilder().token(TG_TOKEN).build()
         
         app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("settings", start)) # Alias for start
+        app.add_handler(CommandHandler("settings", start))
+        app.add_handler(CommandHandler("translate", translate_command))
         
         app.add_handler(CallbackQueryHandler(callback_handler))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
